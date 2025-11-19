@@ -1,3 +1,5 @@
+// src/components/staking/EvmUnbondingInfo.tsx
+
 "use client";
 
 import React, { useState, useEffect } from 'react';
@@ -12,7 +14,13 @@ type UnbondingEntry = {
   unbondingCompletionTimestamp: number;
 };
 
-const EvmUnbondingInfo = ({ project }: { project: Project }) => {
+// Tambahkan prop refreshTrigger
+interface EvmUnbondingInfoProps {
+    project: Project;
+    refreshTrigger?: number; // Prop baru untuk memicu refetch
+}
+
+const EvmUnbondingInfo: React.FC<EvmUnbondingInfoProps> = ({ project, refreshTrigger = 0 }) => {
     const { address } = useAccount();
     const [unbondingEntries, setUnbondingEntries] = useState<UnbondingEntry[]>([]);
     const [isLoading, setIsLoading] = useState(true);
@@ -41,9 +49,11 @@ const EvmUnbondingInfo = ({ project }: { project: Project }) => {
         };
 
         fetchUnbondingData();
-    }, [address, project.apiUrl]);
+        
+    // Tambahkan refreshTrigger ke dependency array
+    }, [address, project.apiUrl, refreshTrigger]);
     
-    // Timer untuk me-refresh tampilan waktu
+    // Timer untuk me-refresh tampilan waktu (setiap 1 menit)
     const [, setTick] = useState(0);
     useEffect(() => {
         const timer = setInterval(() => setTick(t => t + 1), 60000);
@@ -58,29 +68,28 @@ const EvmUnbondingInfo = ({ project }: { project: Project }) => {
             </div>
         );
     }
-    
 
     if (unbondingEntries.length === 0) {
-        return null; // Don't render anything if there are no unbonding entries
+        return null; 
     }
     
     return (
         <div className="space-y-3">
-            <h3 className="text-sm font-semibold text-foreground">Unbonding Delegations</h3>
-            {unbondingEntries.map((entry) => (
-                <div key={entry.transactionHash} className="bg-blue-500/10 border border-blue-500/20 p-3 rounded-lg text-sm">
+            <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Unbonding Delegations</h3>
+            {unbondingEntries.map((entry, index) => (
+                <div key={`${entry.transactionHash}-${index}`} className="bg-blue-500/10 border border-blue-500/20 p-3 rounded-lg text-sm">
                     <div className="flex justify-between items-center gap-2">
-                        <span className="font-semibold text-foreground text-base">
+                        <span className="font-bold text-foreground text-sm">
                             {entry.amount.toFixed(4)} {project.nativeSymbol}
                         </span>
                         <div className="flex flex-col items-end text-slate-500 dark:text-slate-400 text-xs space-y-1">
                             <div className="flex items-center gap-1.5">
-                                <CubeIcon className="w-3 h-3" />
-                                <span>Available after Block #{entry.unbondingCompletionBlock}</span>
+                                <CubeIcon className="w-3 h-3 text-blue-400" />
+                                <span>Block {entry.unbondingCompletionBlock}</span>
                             </div>
                             <div className="flex items-center gap-1.5">
-                                <ClockIcon className="w-3 h-3" />
-                                <span>~ {new Date(entry.unbondingCompletionTimestamp * 1000).toLocaleString()}</span>
+                                <ClockIcon className="w-3 h-3 text-blue-400" />
+                                <span>{new Date(entry.unbondingCompletionTimestamp * 1000).toLocaleString()}</span>
                             </div>
                         </div>
                     </div>

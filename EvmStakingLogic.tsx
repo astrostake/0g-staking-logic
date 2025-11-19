@@ -7,7 +7,7 @@ import { formatEther, parseEther, parseGwei, isAddress } from 'viem';
 import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt, useBalance } from 'wagmi';
 import EvmUnbondingInfo from './EvmUnbondingInfo';
 import StakingForm from './StakingForm';
-import { ArrowPathIcon, StarIcon } from '@heroicons/react/24/outline';
+import { ArrowPathIcon, StarIcon, WalletIcon } from '@heroicons/react/24/outline';
 import { type Validator } from './ValidatorTable';
 import { type Project } from '@/data/projects';
 
@@ -24,7 +24,7 @@ interface EvmStakingLogicProps {
     setStatus: (status: StatusState) => void;
 }
 
-// ABI (Application Binary Interface) for the staking smart contract
+// ABI Updated: Added convertToShares for better precision check possibilities
 const VALIDATOR_ABI = [
     { name: "delegate", type: "function", inputs: [{ name: "delegatorAddress", type: "address" }], outputs: [], stateMutability: "payable" },
     { name: "undelegate", type: "function", inputs: [{ name: "withdrawalAddress", type: "address" }, { name: "shares", type: "uint256" }], outputs: [], stateMutability: "payable" },
@@ -32,7 +32,8 @@ const VALIDATOR_ABI = [
     { name: "getDelegation", type: "function", inputs: [{ name: "delegator", type: "address" }], outputs: [{ name: "", type: "address" }, { name: "", type: "uint256" }], stateMutability: "view" },
     { name: "tokens", type: "function", inputs: [], outputs: [{ name: "", type: "uint256" }], stateMutability: "view" },
     { name: "delegatorShares", type: "function", inputs: [], outputs: [{ name: "", type: "uint256" }], stateMutability: "view" },
-    { name: "withdrawalFeeInGwei", type: "function", inputs: [], outputs: [{ name: "", type: "uint96" }], stateMutability: "view" }
+    { name: "withdrawalFeeInGwei", type: "function", inputs: [], outputs: [{ name: "", type: "uint96" }], stateMutability: "view" },
+    { name: "convertToShares", type: "function", inputs: [{ name: "tokens_", type: "uint256" }], outputs: [{ name: "", type: "uint256" }], stateMutability: "view" }
 ] as const;
 
 const EvmStakingLogic: React.FC<EvmStakingLogicProps> = ({ 
@@ -45,10 +46,23 @@ const EvmStakingLogic: React.FC<EvmStakingLogicProps> = ({
     const [undelegateAmount, setUndelegateAmount] = useState<string>('');
     const [stakePercentage, setStakePercentage] = useState<number>(0);
     const [undelegatePercentage, setUndelegatePercentage] = useState<number>(0);
+    
+    // State for Custom Commission Address
+    const [commissionRecipient, setCommissionRecipient] = useState<string>('');
+    
+    // NEW STATE: Trigger to refresh unbonding info
+    const [refreshTrigger, setRefreshTrigger] = useState(0);
 
     const { address, isConnected } = useAccount();
     const isValidValidator = useMemo(() => isAddress(validator?.address || '0x'), [validator?.address]);
     const shouldEnableQueries = useMemo(() => !!address && isValidValidator && isConnected, [address, isValidValidator, isConnected]);
+
+    // Initialize commission recipient to owner address on load
+    useEffect(() => {
+        if (address) {
+            setCommissionRecipient(address);
+        }
+    }, [address]);
 
     // Check if connected wallet is the validator owner
     const isOwner = useMemo(() => {
@@ -72,7 +86,14 @@ const EvmStakingLogic: React.FC<EvmStakingLogicProps> = ({
     // Important value calculations
     const userShares = useMemo(() => (delegationData as [string, bigint])?.[1] || 0n, [delegationData]);
     const withdrawalFeeInGwei = useMemo(() => withdrawalFeeData ?? 0n, [withdrawalFeeData]);
-    const estimatedUserTokens = useMemo(() => (totalShares && totalShares > 0n) ? (BigInt(totalTokens || 0) * userShares) / totalShares : 0n, [totalShares, userShares, totalTokens]);
+    
+    const estimatedUserTokens = useMemo(() => {
+        if (totalShares && totalShares > 0n && totalTokens) {
+            return (BigInt(totalTokens) * userShares) / totalShares;
+        }
+        return 0n;
+    }, [totalShares, userShares, totalTokens]);
+
     const userAvailableBalance = useMemo(() => userBalanceData?.value ?? 0n, [userBalanceData]);
 
     const { data: hash, isPending, writeContract, error: writeError, reset } = useWriteContract();
@@ -81,29 +102,69 @@ const EvmStakingLogic: React.FC<EvmStakingLogicProps> = ({
     const handleDelegate = useCallback(() => {
         if (!stakeAmount || parseFloat(stakeAmount) <= 0) return;
         setStatus({ message: 'Please confirm in your wallet...', type: 'info' });
-        writeContract({ address: validator.address as `0x${string}`, abi: VALIDATOR_ABI, functionName: 'delegate', args: [address as `0x${string}`], value: parseEther(stakeAmount) });
+        writeContract({ 
+            address: validator.address as `0x${string}`, 
+            abi: VALIDATOR_ABI, 
+            functionName: 'delegate', 
+            args: [address as `0x${string}`], 
+            value: parseEther(stakeAmount) 
+        });
     }, [stakeAmount, validator, address, writeContract, setStatus]);
 
     const handleUndelegate = useCallback(() => {
         if (!undelegateAmount || parseFloat(undelegateAmount) <= 0) return;
+        
         const amountToUndelegateInWei = parseEther(undelegateAmount);
-        const sharesToUndelegate = (totalTokens && totalTokens > 0n) ? (amountToUndelegateInWei * (totalShares || 0n)) / totalTokens : 0n;
+        let sharesToUndelegate = 0n;
+
+        // PRECISION FIX: Smart Max Check
+        if (amountToUndelegateInWei >= estimatedUserTokens) {
+            sharesToUndelegate = userShares;
+        } else {
+            if (totalTokens && totalTokens > 0n) {
+                sharesToUndelegate = (amountToUndelegateInWei * (totalShares || 0n)) / totalTokens;
+            }
+        }
     
+        if (sharesToUndelegate === 0n) {
+            setStatus({ message: 'Calculated shares are 0. Increase amount.', type: 'error' });
+            return;
+        }
+
         setStatus({ message: 'Confirming undelegation...', type: 'info' });
-        writeContract({ address: validator.address as `0x${string}`, abi: VALIDATOR_ABI, functionName: 'undelegate', args: [address as `0x${string}`, sharesToUndelegate], value: parseGwei(withdrawalFeeInGwei.toString()) });
-    }, [undelegateAmount, totalTokens, totalShares, withdrawalFeeInGwei, validator, address, writeContract, setStatus]);
+        writeContract({ 
+            address: validator.address as `0x${string}`, 
+            abi: VALIDATOR_ABI, 
+            functionName: 'undelegate', 
+            args: [address as `0x${string}`, sharesToUndelegate], 
+            value: parseGwei(withdrawalFeeInGwei.toString()) 
+        });
+    }, [undelegateAmount, estimatedUserTokens, userShares, totalTokens, totalShares, withdrawalFeeInGwei, validator, address, writeContract, setStatus]);
 
     const handleWithdrawCommission = useCallback(() => {
-        setStatus({ message: 'Confirming commission withdrawal...', type: 'info' });
-        writeContract({ address: validator.address as `0x${string}`, abi: VALIDATOR_ABI, functionName: 'withdrawCommission', args: [address as `0x${string}`] });
-    }, [validator, address, writeContract, setStatus]);
+        if (!isAddress(commissionRecipient)) {
+            setStatus({ message: 'Invalid recipient address', type: 'error' });
+            return;
+        }
+        setStatus({ message: `Confirming commission withdrawal to ${commissionRecipient.slice(0,6)}...`, type: 'info' });
+        writeContract({ 
+            address: validator.address as `0x${string}`, 
+            abi: VALIDATOR_ABI, 
+            functionName: 'withdrawCommission', 
+            args: [commissionRecipient as `0x${string}`] 
+        });
+    }, [validator, commissionRecipient, writeContract, setStatus]);
 
-    // Effect to monitor transaction status and provide user feedback
+    // Effect to monitor transaction status
     useEffect(() => {
         if (isConfirming) {
             setStatus({ message: 'Transaction sent, waiting for confirmation...', type: 'info', txHash: hash });
         } else if (isConfirmed) {
             setStatus({ message: 'Transaction successful! Data will refresh shortly.', type: 'success', txHash: hash });
+            
+            // TRIGGER REFRESH HERE
+            setRefreshTrigger(prev => prev + 1);
+
             setTimeout(() => {
                 refetchDelegation();
                 refetchUserBalance();
@@ -150,24 +211,47 @@ const EvmStakingLogic: React.FC<EvmStakingLogicProps> = ({
                 </div>
             </div>
             
-            <EvmUnbondingInfo project={project} />
+            {/* Pass refreshTrigger prop here */}
+            <EvmUnbondingInfo project={project} refreshTrigger={refreshTrigger} />
 
             {isOwner && (
-                <div className="bg-purple-500/10 border border-purple-500/20 p-4 rounded-xl text-center">
-                    <div className="flex items-center justify-center mb-2">
-                        <StarIcon className="w-4 h-4 text-purple-400 mr-1.5" />
-                        <h3 className="text-xs font-bold text-purple-400 uppercase tracking-wider">Validator Management</h3>
+                <div className="bg-purple-500/10 border border-purple-500/20 p-4 rounded-xl">
+                    <div className="flex items-center justify-center mb-4">
+                        <StarIcon className="w-5 h-5 text-purple-400 mr-2" />
+                        <h3 className="text-sm font-bold text-purple-400 uppercase tracking-wider">Validator Management</h3>
                     </div>
-                    <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">
-                        As the validator operator, you can withdraw your accumulated commission.
-                    </p>
-                    <button
-                        onClick={handleWithdrawCommission}
-                        disabled={isProcessing}
-                        className="w-full sm:w-auto px-6 py-2 rounded-lg bg-purple-500/80 text-white font-bold text-sm transition-all hover:bg-purple-500 disabled:bg-slate-600 disabled:cursor-not-allowed"
-                    >
-                        {isProcessing ? 'Processing...' : 'Withdraw Commission'}
-                    </button>
+                    <div className="space-y-3">
+                        <div className="text-left">
+                            <label className="text-xs text-slate-500 dark:text-slate-400 mb-1 block ml-1">Recipient Address</label>
+                            <div className="relative">
+                                <WalletIcon className="w-5 h-5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                                <input 
+                                    type="text" 
+                                    value={commissionRecipient}
+                                    onChange={(e) => setCommissionRecipient(e.target.value)}
+                                    placeholder="0x..."
+                                    className="w-full pl-10 pr-4 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500/50"
+                                />
+                            </div>
+                            {!isAddress(commissionRecipient) && commissionRecipient !== '' && (
+                                <p className="text-red-400 text-xs mt-1 ml-1">Invalid EVM address</p>
+                            )}
+                        </div>
+                        <button
+                            onClick={handleWithdrawCommission}
+                            disabled={isProcessing || !isAddress(commissionRecipient)}
+                            className="w-full px-6 py-2.5 rounded-lg bg-purple-500 hover:bg-purple-600 text-white font-bold text-sm transition-all shadow-lg shadow-purple-500/20 disabled:bg-slate-600 disabled:shadow-none disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                        >
+                            {isProcessing ? (
+                                <>
+                                    <ArrowPathIcon className="w-4 h-4 animate-spin" />
+                                    Processing...
+                                </>
+                            ) : (
+                                'Withdraw Commission'
+                            )}
+                        </button>
+                    </div>
                 </div>
             )}
 
